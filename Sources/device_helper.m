@@ -3,6 +3,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#import "airlift_target.h"
+
 typedef const void *AMDeviceRef;
 typedef const void *AMDeviceNotificationRef;
 typedef void *AMDServiceConnectionRef;
@@ -309,7 +311,7 @@ static BOOL IsGeneratedName(NSString *value, NSString *prefix) {
 }
 
 static BOOL IsCanaryLeaf(NSString *leaf) {
-    return IsGeneratedName(leaf, @"airlift-canary-24A435-") &&
+    return IsGeneratedName(leaf, AIRLIFT_CANARY_PREFIX) &&
         [leaf hasSuffix:@".bin"];
 }
 
@@ -376,6 +378,31 @@ static NSDictionary *SessionSummary(DeviceSession *session) {
     };
 }
 
+static BOOL TargetMatches(NSDictionary *summary,
+                          NSString *product,
+                          NSString *build) {
+    return [summary[@"productType"] isEqual:product] &&
+        [summary[@"productVersion"] isEqual:AIRLIFT_TARGET_VERSION] &&
+        [summary[@"buildVersion"] isEqual:build];
+}
+
+static BOOL TargetGate(NSDictionary *summary, BOOL *tested) {
+    *tested = NO;
+#define AIRLIFT_MATCH_TESTED(product, build) \
+    if (TargetMatches(summary, product, build)) { \
+        *tested = YES; \
+        return YES; \
+    }
+    AIRLIFT_TESTED_TARGETS(AIRLIFT_MATCH_TESTED)
+#undef AIRLIFT_MATCH_TESTED
+
+#define AIRLIFT_MATCH_EXPECTED(product, build) \
+    if (TargetMatches(summary, product, build)) return YES;
+    AIRLIFT_EXPECTED_TARGETS(AIRLIFT_MATCH_EXPECTED)
+#undef AIRLIFT_MATCH_EXPECTED
+    return NO;
+}
+
 static BOOL SendAll(AMDServiceConnectionRef service, NSData *data) {
     const uint8_t *cursor = data.bytes;
     size_t remaining = data.length;
@@ -395,9 +422,9 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
     NSData *archive = [NSData dataWithContentsOfFile:args[3]];
     NSData *books = [NSData dataWithContentsOfFile:args[4]];
     BOOL safeArguments =
-        IsGeneratedName(source, @"airlift-src-24A435-") &&
-        IsGeneratedName(linkDestination, @"airlift-link-24A435-") &&
-        IsGeneratedName(recovered, @"airlift-recovered-24A435-");
+        IsGeneratedName(source, AIRLIFT_SOURCE_PREFIX) &&
+        IsGeneratedName(linkDestination, AIRLIFT_LINK_PREFIX) &&
+        IsGeneratedName(recovered, AIRLIFT_RECOVERED_PREFIX);
     BOOL booksAbsent = AllTrackedBooksFilesAbsent(session->afc);
     BOOL freshPaths = !AFCExists(session->afc, source) &&
         !AFCExists(session->afc, linkDestination) &&
@@ -471,9 +498,9 @@ static NSDictionary *Finish(DeviceSession *session, NSArray<NSString *> *args) {
     NSString *targetTail = args[4];
     NSString *targetLeaf = args[5];
     BOOL safeArguments =
-        IsGeneratedName(source, @"airlift-src-24A435-") &&
-        IsGeneratedName(linkDestination, @"airlift-link-24A435-") &&
-        IsGeneratedName(recovered, @"airlift-recovered-24A435-") &&
+        IsGeneratedName(source, AIRLIFT_SOURCE_PREFIX) &&
+        IsGeneratedName(linkDestination, AIRLIFT_LINK_PREFIX) &&
+        IsGeneratedName(recovered, AIRLIFT_RECOVERED_PREFIX) &&
         IsSafeRelativePath(targetTail) && IsCanaryLeaf(targetLeaf) &&
         expected.length > 0 && expected.length < 4096;
     if (!safeArguments)
@@ -536,10 +563,8 @@ int main(int argc, const char *argv[]) {
         DeviceSession session;
         OpenSession(&session);
         NSDictionary *summary = SessionSummary(&session);
-        BOOL targetGatePassed =
-            [summary[@"productType"] isEqual:@"iPhone18,2"] &&
-            [summary[@"productVersion"] isEqual:@"27.0"] &&
-            [summary[@"buildVersion"] isEqual:@"24A435"];
+        BOOL targetTested = NO;
+        BOOL targetGatePassed = TargetGate(summary, &targetTested);
         NSDictionary *operation = nil;
         if (session.afcStatus == 0 && session.afc && targetGatePassed) {
             if ([command isEqual:@"probe"] && argc == 3) {
@@ -568,6 +593,7 @@ int main(int argc, const char *argv[]) {
 
         NSMutableDictionary *result = summary.mutableCopy;
         result[@"targetGatePassed"] = @(targetGatePassed);
+        result[@"targetTested"] = @(targetTested);
         result[@"command"] = command ?: @"(nil)";
         result[@"operation"] = operation ?: @{ @"ok": @NO };
         PrintJSON(result);

@@ -378,29 +378,24 @@ static NSDictionary *SessionSummary(DeviceSession *session) {
     };
 }
 
-static BOOL TargetMatches(NSDictionary *summary,
-                          NSString *product,
-                          NSString *build) {
-    return [summary[@"productType"] isEqual:product] &&
-        [summary[@"productVersion"] isEqual:AIRLIFT_TARGET_VERSION] &&
+static BOOL BuildMatches(NSDictionary *summary,
+                         NSString *version,
+                         NSString *build) {
+    return [summary[@"productVersion"] isEqual:version] &&
         [summary[@"buildVersion"] isEqual:build];
 }
 
 static BOOL TargetGate(NSDictionary *summary, BOOL *tested) {
     *tested = NO;
-#define AIRLIFT_MATCH_TESTED(product, build) \
-    if (TargetMatches(summary, product, build)) { \
+    if (![summary[@"productType"] hasPrefix:@"iPhone"]) return NO;
+#define AIRLIFT_MATCH_TESTED(version, build) \
+    if (BuildMatches(summary, version, build)) { \
         *tested = YES; \
         return YES; \
     }
-    AIRLIFT_TESTED_TARGETS(AIRLIFT_MATCH_TESTED)
+    AIRLIFT_TESTED_BUILDS(AIRLIFT_MATCH_TESTED)
 #undef AIRLIFT_MATCH_TESTED
-
-#define AIRLIFT_MATCH_EXPECTED(product, build) \
-    if (TargetMatches(summary, product, build)) return YES;
-    AIRLIFT_EXPECTED_TARGETS(AIRLIFT_MATCH_EXPECTED)
-#undef AIRLIFT_MATCH_EXPECTED
-    return NO;
+    return YES;
 }
 
 static BOOL SendAll(AMDServiceConnectionRef service, NSData *data) {

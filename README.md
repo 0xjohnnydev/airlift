@@ -6,7 +6,7 @@ This is a simple proof-of-concept for developers and security researchers.
 
 If you are worried about 🔥🪲4⃣☁️ - there are always more bugs <sub><img src="./assets/trollface.svg" width="22" height="18" alt="trollface"></sub>
 
-AirTraffic syncs media, including Books, from a Mac to iOS. airlift abuses that path to read and write files outside AirTraffic's intended directory scope. It runs from a paired Mac over Wi-Fi or USB, with no iOS app required. Tested on an iPhone18,2 running iOS 27.0 RC (24A435) and an iPhone17,1 running iOS 27.0 beta 4 (24A5390f). iOS 27.0 final (24A437) is expected to work but has not yet been verified.
+AirTraffic syncs media, including Books, from a Mac to iOS. airlift abuses that path to read and write files outside AirTraffic's intended directory scope. It runs from a paired Mac over Wi-Fi or USB, with no iOS app required. Tested on iOS 27.0 RC (24A435); it should also work on iOS 27.0 final (24A437). Other iPhone builds are allowed with a warning.
 
 #### Verified scope
 

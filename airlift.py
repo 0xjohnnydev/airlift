@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fresh-file write and export-readback PoC for supported iOS 27.0 builds."""
+"""Fresh-file write and export-readback PoC for paired iPhones."""
 
 from __future__ import annotations
 
@@ -56,16 +56,7 @@ def header_targets(name: str) -> tuple[tuple[str, str], ...]:
     return targets
 
 
-VERSION = header_string("AIRLIFT_TARGET_VERSION")
-TESTED_TARGETS = frozenset(
-    (product, VERSION, build)
-    for product, build in header_targets("AIRLIFT_TESTED_TARGETS")
-)
-EXPECTED_TARGETS = frozenset(
-    (product, VERSION, build)
-    for product, build in header_targets("AIRLIFT_EXPECTED_TARGETS")
-)
-SUPPORTED_TARGETS = TESTED_TARGETS | EXPECTED_TARGETS
+TESTED_BUILDS = frozenset(header_targets("AIRLIFT_TESTED_BUILDS"))
 SOURCE_PREFIX = header_string("AIRLIFT_SOURCE_PREFIX")
 LINK_PREFIX = header_string("AIRLIFT_LINK_PREFIX")
 RECOVERED_PREFIX = header_string("AIRLIFT_RECOVERED_PREFIX")
@@ -127,11 +118,12 @@ def available_devices(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
         product = hardware.get("productType")
         version = device_version(state, properties)
         build = device_build(state, properties)
-        target = (product, version, build)
+        tested = (version, build) in TESTED_BUILDS
         if not (
             hardware.get("reality") == "physical"
             and connection.get("pairingState") == "paired"
-            and target in SUPPORTED_TARGETS
+            and isinstance(product, str)
+            and product.startswith("iPhone")
             and isinstance(udid, str)
             and udid
         ):
@@ -151,7 +143,7 @@ def available_devices(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "version": version,
                 "build": build,
                 "transport": transport,
-                "tested": target in TESTED_TARGETS,
+                "tested": tested,
                 "udid": udid,
             }
         )
@@ -172,7 +164,7 @@ def choose_device(
     devices: list[dict[str, Any]], requested: str | None
 ) -> dict[str, Any]:
     if not devices:
-        raise AirLiftError("no paired iPhone matching a supported target found")
+        raise AirLiftError("no paired physical iPhone found")
 
     if requested:
         for device in devices:

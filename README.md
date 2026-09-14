@@ -12,7 +12,8 @@ AirTraffic syncs media, including Books, from a Mac to iOS. airlift abuses that 
 
 Fresh-file writes were confirmed in the following directories:
 
-```
+<table>
+<tr><td><pre>
 /var/mobile
 /var/mobile/Documents
 /var/mobile/Library
@@ -25,7 +26,8 @@ Fresh-file writes were confirmed in the following directories:
 /var/mobile/Containers/Data/Application
 /var/mobile/Containers/Shared/AppGroup
 /var/tmp
-```
+</pre></td></tr>
+</table>
 
 Reads are indirect: a known file is moved into Media, read through AFC, and
 moved back.
@@ -61,27 +63,29 @@ NSFileManager
 
 Effective logic in `-[ATAirlock processCompletedAsset:]` for these Book assets:
 
-```objc
+<table>
+<tr><td><pre>
 // Books "Persistent ID" reaches asset.identifier without path validation.
 NSString *source =
     [@"/var/mobile/Media/Airlock/Book"
         stringByAppendingPathComponent:asset.identifier];
-
+&nbsp;
 // FileComplete.AssetPath controls asset.path.
 NSString *destination =
     [[@"/var/mobile/Media/"
         stringByAppendingPathComponent:asset.path]
         stringByStandardizingPath];
-
+&nbsp;
 // This checks the path string, not where a symlink resolves.
 if (![destination hasPrefix:@"/var/mobile/Media/"])
     return;
-
+&nbsp;
 // The source is unchecked and the destination follows ancestor symlinks.
 [fileManager moveItemAtPath:source
                      toPath:destination
                       error:&error];
-```
+</pre></td></tr>
+</table>
 
 The unchecked source accepts `..` components from a Books asset identifier.
 StreamingZip accepts the relative symlink while it is still contained in its
@@ -95,12 +99,14 @@ The included PoC writes a random canary, verifies it, and removes it.
 airlift lists compatible paired iPhones and asks which one to use. Pass a
 UDID with `--device` to skip the prompt.
 
-```sh
+<table>
+<tr><td><pre>
 make
 ./airlift.py
-
+&nbsp;
 # Choose another destination.
 ./airlift.py --target /var/mobile/Library/Safari
-```
+</pre></td></tr>
+</table>
 
 The default destination is `/var/mobile/Library/SpringBoard`.

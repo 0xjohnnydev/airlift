@@ -36,24 +36,24 @@ As of now, this does **not** work on the MobileGestalt plist.
 
 <table>
 <tr><td><pre>──────────────── macOS ────────────────
-        MobileDevice.framework
-                   ↓
-       AirTrafficHost.framework
-
+MobileDevice.framework
+↓
+AirTrafficHost.framework
+&nbsp;
 ───────────────── iOS ─────────────────
-    com.apple.streaming_zip_conduit
-                   ↓
-             com.apple.afc
-                   ↓
-   com.apple.atc / AirTrafficDevice
-                   ↓
-           Books sync client
-                   ↓
-           ATLegacyAssetLink
-                   ↓
-               ATAirlock
-                   ↓
-             NSFileManager
+com.apple.streaming_zip_conduit
+↓
+com.apple.afc
+↓
+com.apple.atc / AirTrafficDevice
+↓
+Books sync client
+↓
+ATLegacyAssetLink
+↓
+ATAirlock
+↓
+NSFileManager
 </pre></td></tr>
 </table>
 

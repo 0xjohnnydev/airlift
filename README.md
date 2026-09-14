@@ -34,8 +34,8 @@ As of now, this does **not** work on the MobileGestalt plist.
 
 #### Components
 
-```text
-──────────────── macOS ────────────────
+<table>
+<tr><td><pre>──────────────── macOS ────────────────
         MobileDevice.framework
                    ↓
        AirTrafficHost.framework
@@ -54,7 +54,8 @@ As of now, this does **not** work on the MobileGestalt plist.
                ATAirlock
                    ↓
              NSFileManager
-```
+</pre></td></tr>
+</table>
 
 #### ATAirlock path validation
 

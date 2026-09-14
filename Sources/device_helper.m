@@ -255,12 +255,17 @@ static NSData *AFCReadFile(AFCConnectionRef afc, NSString *path) {
     if (AFCFileRefOpen(afc, path.fileSystemRepresentation, 1, &file) != 0 ||
         !file) return nil;
     NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)size];
-    long length = (long)size;
-    int status = size == 0
-        ? 0 : AFCFileRefRead(afc, file, data.mutableBytes, &length);
-    AFCFileRefClose(afc, file);
-    if (status != 0 || length < 0 || length > size) return nil;
-    data.length = (NSUInteger)length;
+    long long offset = 0;
+    int status = 0;
+    while (offset < size) {
+        long length = (long)(size - offset);
+        status = AFCFileRefRead(
+            afc, file, (uint8_t *)data.mutableBytes + offset, &length);
+        if (status != 0 || length <= 0 || length > size - offset) break;
+        offset += length;
+    }
+    int closeStatus = AFCFileRefClose(afc, file);
+    if (status != 0 || closeStatus != 0 || offset != size) return nil;
     return data;
 }
 
@@ -305,14 +310,43 @@ static BOOL IsSafeRelativePath(NSString *path) {
     return YES;
 }
 
-static BOOL IsGeneratedName(NSString *value, NSString *prefix) {
-    return value.length && [value hasPrefix:prefix] &&
-        [value rangeOfString:@"/"].location == NSNotFound;
+static BOOL IsLowercaseHex(NSString *value, NSUInteger length) {
+    if (value.length != length) return NO;
+    for (NSUInteger index = 0; index < value.length; index++) {
+        unichar character = [value characterAtIndex:index];
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f'))) return NO;
+    }
+    return YES;
+}
+
+static NSString *GeneratedToken(NSString *value, NSString *prefix) {
+    if (![value hasPrefix:prefix] ||
+        [value rangeOfString:@"/"].location != NSNotFound) return nil;
+    NSString *token = [value substringFromIndex:prefix.length];
+    return IsLowercaseHex(token, 20) ? token : nil;
+}
+
+static BOOL GeneratedNamesMatch(NSString *source,
+                                NSString *linkDestination,
+                                NSString *recovered) {
+    NSString *token = GeneratedToken(source, AIRLIFT_SOURCE_PREFIX);
+    return token &&
+        [GeneratedToken(linkDestination, AIRLIFT_LINK_PREFIX)
+            isEqualToString:token] &&
+        [GeneratedToken(recovered, AIRLIFT_RECOVERED_PREFIX)
+            isEqualToString:token];
 }
 
 static BOOL IsCanaryLeaf(NSString *leaf) {
-    return IsGeneratedName(leaf, AIRLIFT_CANARY_PREFIX) &&
-        [leaf hasSuffix:@".bin"];
+    if (![leaf hasPrefix:AIRLIFT_CANARY_PREFIX] ||
+        ![leaf hasSuffix:@".bin"] ||
+        leaf.length < AIRLIFT_CANARY_PREFIX.length + @".bin".length ||
+        [leaf rangeOfString:@"/"].location != NSNotFound) return NO;
+    NSRange tokenRange = NSMakeRange(
+        AIRLIFT_CANARY_PREFIX.length,
+        leaf.length - AIRLIFT_CANARY_PREFIX.length - @".bin".length);
+    return IsLowercaseHex([leaf substringWithRange:tokenRange], 32);
 }
 
 static BOOL RemoveGeneratedTree(AFCConnectionRef afc,
@@ -417,15 +451,14 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
     NSData *archive = [NSData dataWithContentsOfFile:args[3]];
     NSData *books = [NSData dataWithContentsOfFile:args[4]];
     BOOL safeArguments =
-        IsGeneratedName(source, AIRLIFT_SOURCE_PREFIX) &&
-        IsGeneratedName(linkDestination, AIRLIFT_LINK_PREFIX) &&
-        IsGeneratedName(recovered, AIRLIFT_RECOVERED_PREFIX);
+        GeneratedNamesMatch(source, linkDestination, recovered);
     BOOL booksAbsent = AllTrackedBooksFilesAbsent(session->afc);
     BOOL freshPaths = !AFCExists(session->afc, source) &&
         !AFCExists(session->afc, linkDestination) &&
         !AFCExists(session->afc, recovered);
     if (!safeArguments || !archive || !books || !booksAbsent || !freshPaths) {
         return @{ @"ok": @NO,
+                  @"cleanupAuthorized": @NO,
                   @"safeArguments": @(safeArguments),
                   @"localInputsReadable": @(archive != nil && books != nil),
                   @"booksPreimageAbsent": @(booksAbsent),
@@ -474,6 +507,7 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
     BOOL ok = serviceStatus == 0 && messageStatus == 0 && archiveSent &&
         sourceObjects && booksWritten;
     return @{ @"ok": @(ok),
+              @"cleanupAuthorized": @YES,
               @"safeArguments": @YES,
               @"booksPreimageAbsent": @YES,
               @"freshPaths": @YES,
@@ -492,16 +526,24 @@ static NSDictionary *Finish(DeviceSession *session, NSArray<NSString *> *args) {
     NSData *expected = [NSData dataWithContentsOfFile:args[3]];
     NSString *targetTail = args[4];
     NSString *targetLeaf = args[5];
+    NSString *waitArgument = args[6];
     BOOL safeArguments =
-        IsGeneratedName(source, AIRLIFT_SOURCE_PREFIX) &&
-        IsGeneratedName(linkDestination, AIRLIFT_LINK_PREFIX) &&
-        IsGeneratedName(recovered, AIRLIFT_RECOVERED_PREFIX) &&
+        GeneratedNamesMatch(source, linkDestination, recovered) &&
         IsSafeRelativePath(targetTail) && IsCanaryLeaf(targetLeaf) &&
-        expected.length > 0 && expected.length < 4096;
+        expected.length > 0 && expected.length < 4096 &&
+        ([waitArgument isEqual:@"0"] || [waitArgument isEqual:@"1"]);
     if (!safeArguments)
         return @{ @"ok": @NO, @"safeArguments": @NO };
 
-    NSData *observed = AFCReadFile(session->afc, recovered);
+    NSData *observed = nil;
+    NSUInteger readbackAttempts = 0;
+    NSUInteger maximumAttempts = [waitArgument isEqual:@"1"] ? 60 : 1;
+    for (NSUInteger index = 0; index < maximumAttempts; index++) {
+        readbackAttempts++;
+        observed = AFCReadFile(session->afc, recovered);
+        if ([observed isEqualToData:expected]) break;
+        if (index + 1 < maximumAttempts) usleep(250000);
+    }
     BOOL recoveredPresent = observed != nil;
     BOOL bytesMatch = recoveredPresent && [observed isEqualToData:expected];
     NSMutableArray<NSString *> *failures = NSMutableArray.array;
@@ -536,6 +578,7 @@ static NSDictionary *Finish(DeviceSession *session, NSArray<NSString *> *args) {
               @"safeArguments": @YES,
               @"recoveredPresent": @(recoveredPresent),
               @"recoveredBytesMatch": @(bytesMatch),
+              @"readbackAttempts": @(readbackAttempts),
               @"observedLength": @(observed.length),
               @"cleanupComplete": @(cleanupComplete),
               @"cleanupFailureCount": @(failures.count),
@@ -564,6 +607,8 @@ int main(int argc, const char *argv[]) {
         if (session.afcStatus == 0 && session.afc && targetGatePassed) {
             if ([command isEqual:@"probe"] && argc == 3) {
                 operation = @{ @"ok": @YES,
+                    @"booksStagingAbsent":
+                        @(AllTrackedBooksFilesAbsent(session.afc)),
                     @"booksSyncPlistPresent":
                         @(AFCExists(session.afc, @"Books/Sync/Books.plist")) };
             } else if ([command isEqual:@"stage"] && argc == 8) {
@@ -574,7 +619,7 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[6]],
                     [NSString stringWithUTF8String:argv[7]],
                 ]);
-            } else if ([command isEqual:@"finish"] && argc == 9) {
+            } else if ([command isEqual:@"finish"] && argc == 10) {
                 operation = Finish(&session, @[
                     [NSString stringWithUTF8String:argv[3]],
                     [NSString stringWithUTF8String:argv[4]],
@@ -582,6 +627,7 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[6]],
                     [NSString stringWithUTF8String:argv[7]],
                     [NSString stringWithUTF8String:argv[8]],
+                    [NSString stringWithUTF8String:argv[9]],
                 ]);
             }
         }

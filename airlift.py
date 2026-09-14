@@ -333,7 +333,7 @@ def preflight(udid: str) -> None:
         raise AirLiftError(
             "device/build preflight failed", {"preflight": result}
         )
-    if operation.get("booksSyncPlistPresent") is not False:
+    if operation.get("booksStagingAbsent") is not True:
         raise AirLiftError(
             "Books sync staging is already in use", {"preflight": result}
         )
@@ -345,7 +345,6 @@ def attempt(
     leaf: str,
     payload: bytes,
     *,
-    recovery_only: bool,
     verbose: bool,
 ) -> dict[str, Any]:
     token = secrets.token_hex(10)
@@ -357,16 +356,12 @@ def attempt(
     target_identifier = posixpath.relpath(target_path, AIRLOCK_ROOT)
     payload_identifier = f"../../{source}/payload"
 
-    if recovery_only:
-        identifiers = [link_identifier, target_identifier]
-        destinations = [link_destination, recovered]
-    else:
-        identifiers = [link_identifier, payload_identifier, target_identifier]
-        destinations = [
-            link_destination,
-            posixpath.join(link_destination, leaf),
-            recovered,
-        ]
+    identifiers = [link_identifier, payload_identifier, target_identifier]
+    destinations = [
+        link_destination,
+        posixpath.join(link_destination, leaf),
+        recovered,
+    ]
 
     with tempfile.TemporaryDirectory(prefix="airlift-") as temporary:
         work = Path(temporary)
@@ -383,6 +378,8 @@ def attempt(
         finish: dict[str, Any] = {"operation": {"ok": False}}
         operation_error: Exception | None = None
         finish_error: Exception | None = None
+        cleanup_authorized = False
+        airtraffic_attempted = False
         try:
             stage = native(
                 "stage",
@@ -393,7 +390,11 @@ def attempt(
                 os.fspath(archive_path),
                 os.fspath(books_path),
             )
+            cleanup_authorized = bool(
+                stage.get("operation", {}).get("cleanupAuthorized")
+            )
             if operation_ok(stage):
+                airtraffic_attempted = True
                 command = [os.fspath(AIRTRAFFIC_HOST), udid]
                 for identifier, destination in zip(identifiers, destinations):
                     command.extend((identifier, destination))
@@ -401,19 +402,23 @@ def attempt(
         except Exception as error:
             operation_error = error
         finally:
-            try:
-                finish = native(
-                    "finish",
-                    udid,
-                    source,
-                    link_destination,
-                    recovered,
-                    os.fspath(expected_path),
-                    target[1:],
-                    leaf,
-                )
-            except Exception as error:
-                finish_error = error
+            if cleanup_authorized:
+                try:
+                    finish = native(
+                        "finish",
+                        udid,
+                        source,
+                        link_destination,
+                        recovered,
+                        os.fspath(expected_path),
+                        target[1:],
+                        leaf,
+                        "1" if airtraffic_attempted else "0",
+                    )
+                except Exception as error:
+                    finish_error = error
+            else:
+                finish["operation"]["cleanupSkipped"] = True
 
     operation = finish.get("operation", {})
     result = {
@@ -458,26 +463,9 @@ def run(
         f"airlift canary\nbuild={build}\nnonce={secrets.token_hex(24)}\n"
     ).encode()
 
-    primary = attempt(
-        udid, target, leaf, payload, recovery_only=False, verbose=verbose
-    )
-    recovery = None
-    if not primary["exactBytesRecovered"]:
-        if not primary["cleanupComplete"]:
-            raise AirLiftError(
-                "primary cleanup was incomplete; refusing to continue",
-                {"primary": primary},
-            )
-        recovery = attempt(
-            udid, target, leaf, payload, recovery_only=True, verbose=verbose
-        )
-
-    exact = primary["exactBytesRecovered"] or bool(
-        recovery and recovery["exactBytesRecovered"]
-    )
-    clean = primary["cleanupComplete"] and (
-        recovery is None or recovery["cleanupComplete"]
-    )
+    primary = attempt(udid, target, leaf, payload, verbose=verbose)
+    exact = primary["exactBytesRecovered"]
+    clean = primary["cleanupComplete"]
     preflight(udid)
     return {
         "ok": bool(exact and clean),
@@ -497,7 +485,6 @@ def run(
         "cleanupComplete": clean,
         "existingFileTargeted": False,
         "primary": primary,
-        "dedicatedRecovery": recovery,
     }
 
 

@@ -103,6 +103,12 @@ static const char *TrackedBooksFiles[] = {
     "Books/Sync/Database/OutstandingAssets_4.sqlite-wal",
 };
 
+static const char *TrackedBooksDirectories[] = {
+    "Books",
+    "Books/Sync",
+    "Books/Sync/Database",
+};
+
 static CFStringRef TargetIdentifier;
 static AMDeviceRef TargetDevice;
 
@@ -248,9 +254,11 @@ static NSString *AFCFileKind(AFCConnectionRef afc, NSString *path) {
     return kind;
 }
 
-static NSData *AFCReadFile(AFCConnectionRef afc, NSString *path) {
+static NSData *AFCReadFileWithLimit(AFCConnectionRef afc,
+                                    NSString *path,
+                                    long long limit) {
     long long size = AFCFileSize(afc, path);
-    if (size < 0 || size > 16 * 1024 * 1024) return nil;
+    if (size < 0 || size > limit) return nil;
     AFCFileRef file = NULL;
     if (AFCFileRefOpen(afc, path.fileSystemRepresentation, 1, &file) != 0 ||
         !file) return nil;
@@ -267,6 +275,10 @@ static NSData *AFCReadFile(AFCConnectionRef afc, NSString *path) {
     int closeStatus = AFCFileRefClose(afc, file);
     if (status != 0 || closeStatus != 0 || offset != size) return nil;
     return data;
+}
+
+static NSData *AFCReadFile(AFCConnectionRef afc, NSString *path) {
+    return AFCReadFileWithLimit(afc, path, 16 * 1024 * 1024);
 }
 
 static BOOL AFCWriteFile(AFCConnectionRef afc, NSString *path, NSData *data) {
@@ -299,6 +311,220 @@ static BOOL AllTrackedBooksFilesAbsent(AFCConnectionRef afc) {
         if (AFCExists(afc, path)) return NO;
     }
     return YES;
+}
+
+static NSArray<NSString *> *PresentTrackedBooksPaths(AFCConnectionRef afc) {
+    NSMutableArray<NSString *> *paths = NSMutableArray.array;
+    for (NSUInteger index = 0;
+         index < sizeof(TrackedBooksFiles) / sizeof(char *);
+         index++) {
+        NSString *path =
+            [NSString stringWithUTF8String:TrackedBooksFiles[index]];
+        if (AFCExists(afc, path)) [paths addObject:path];
+    }
+    return paths;
+}
+
+static NSString *SnapshotFileName(NSUInteger index) {
+    return [NSString stringWithFormat:@"file-%lu.bin", (unsigned long)index];
+}
+
+static NSString *SnapshotManifestPath(NSString *root) {
+    return [root stringByAppendingPathComponent:@"manifest.plist"];
+}
+
+static NSDictionary *LoadBooksSnapshot(NSString *root) {
+    NSData *data = [NSData dataWithContentsOfFile:SnapshotManifestPath(root)];
+    if (!data) return nil;
+    id value = [NSPropertyListSerialization propertyListWithData:data
+        options:NSPropertyListImmutable format:NULL error:nil];
+    if (![value isKindOfClass:NSDictionary.class] ||
+        ![value[@"version"] isEqual:@1] ||
+        ![value[@"files"] isKindOfClass:NSDictionary.class] ||
+        ![value[@"directories"] isKindOfClass:NSDictionary.class]) return nil;
+
+    NSDictionary *files = value[@"files"];
+    for (NSUInteger index = 0;
+         index < sizeof(TrackedBooksFiles) / sizeof(char *);
+         index++) {
+        NSString *path = [NSString stringWithUTF8String:TrackedBooksFiles[index]];
+        NSDictionary *row = [files[path] isKindOfClass:NSDictionary.class]
+            ? files[path] : nil;
+        NSString *expectedName = SnapshotFileName(index);
+        if (![row[@"exists"] isKindOfClass:NSNumber.class] ||
+            ![row[@"localName"] isEqual:expectedName]) return nil;
+        if ([row[@"exists"] boolValue]) {
+            NSString *localPath = [root stringByAppendingPathComponent:expectedName];
+            BOOL isDirectory = NO;
+            if (![[NSFileManager defaultManager] fileExistsAtPath:localPath
+                isDirectory:&isDirectory] || isDirectory) return nil;
+        }
+    }
+    NSDictionary *directories = value[@"directories"];
+    for (NSUInteger index = 0;
+         index < sizeof(TrackedBooksDirectories) / sizeof(char *);
+         index++) {
+        NSString *path =
+            [NSString stringWithUTF8String:TrackedBooksDirectories[index]];
+        if (![directories[path] isKindOfClass:NSNumber.class]) return nil;
+    }
+    return value;
+}
+
+static NSDictionary *SnapshotBooksState(AFCConnectionRef afc, NSString *root) {
+    BOOL isDirectory = NO;
+    BOOL rootReady = [[NSFileManager defaultManager] fileExistsAtPath:root
+        isDirectory:&isDirectory] && isDirectory;
+    if (!rootReady ||
+        [[NSFileManager defaultManager] fileExistsAtPath:SnapshotManifestPath(root)])
+        return @{ @"ok": @NO, @"snapshotDirectoryReady": @(rootReady) };
+
+    NSMutableDictionary *files = NSMutableDictionary.dictionary;
+    NSMutableDictionary *directories = NSMutableDictionary.dictionary;
+    NSMutableArray<NSString *> *presentPaths = NSMutableArray.array;
+    unsigned long long totalBytes = 0;
+    NSError *localError = nil;
+
+    for (NSUInteger index = 0;
+         index < sizeof(TrackedBooksFiles) / sizeof(char *);
+         index++) {
+        NSString *path = [NSString stringWithUTF8String:TrackedBooksFiles[index]];
+        NSString *localName = SnapshotFileName(index);
+        BOOL exists = AFCExists(afc, path);
+        if (exists && ![AFCFileKind(afc, path) isEqual:@"S_IFREG"])
+            return @{ @"ok": @NO, @"unexpectedFileType": path };
+        NSData *data = exists
+            ? AFCReadFileWithLimit(afc, path, 128 * 1024 * 1024) : nil;
+        if (exists && !data)
+            return @{ @"ok": @NO, @"snapshotReadFailed": path };
+        if (data) {
+            totalBytes += data.length;
+            if (totalBytes > 256 * 1024 * 1024)
+                return @{ @"ok": @NO, @"snapshotTooLarge": @YES };
+            NSString *localPath = [root stringByAppendingPathComponent:localName];
+            if (![data writeToFile:localPath
+                    options:NSDataWritingWithoutOverwriting
+                      error:&localError])
+                return @{ @"ok": @NO,
+                          @"snapshotWriteFailed": path,
+                          @"localError": localError.localizedDescription ?: @"unknown" };
+            [presentPaths addObject:path];
+        }
+        files[path] = @{ @"exists": @(exists),
+                         @"localName": localName,
+                         @"size": @(data.length) };
+    }
+
+    for (NSUInteger index = 0;
+         index < sizeof(TrackedBooksDirectories) / sizeof(char *);
+         index++) {
+        NSString *path =
+            [NSString stringWithUTF8String:TrackedBooksDirectories[index]];
+        BOOL exists = AFCExists(afc, path);
+        NSString *kind = exists ? AFCFileKind(afc, path) : nil;
+        if (exists && ![kind isEqual:@"S_IFDIR"])
+            return @{ @"ok": @NO, @"unexpectedDirectoryType": path };
+        directories[path] = @(exists);
+    }
+
+    NSDictionary *manifest = @{ @"version": @1,
+                                 @"files": files,
+                                 @"directories": directories };
+    NSData *manifestData = [NSPropertyListSerialization
+        dataWithPropertyList:manifest format:NSPropertyListBinaryFormat_v1_0
+        options:0 error:&localError];
+    BOOL wroteManifest = manifestData && [manifestData
+        writeToFile:SnapshotManifestPath(root)
+        options:NSDataWritingAtomic
+        error:&localError];
+    return @{ @"ok": @(wroteManifest),
+              @"presentPaths": presentPaths,
+              @"snapshotBytes": @(totalBytes),
+              @"localError": wroteManifest
+                  ? (id)NSNull.null
+                  : (localError.localizedDescription ?: @"unknown") };
+}
+
+static BOOL BooksStateMatchesSnapshot(AFCConnectionRef afc,
+                                      NSString *root,
+                                      NSDictionary *snapshot) {
+    NSDictionary *files = snapshot[@"files"];
+    for (NSUInteger index = 0;
+         index < sizeof(TrackedBooksFiles) / sizeof(char *);
+         index++) {
+        NSString *path = [NSString stringWithUTF8String:TrackedBooksFiles[index]];
+        NSDictionary *row = files[path];
+        BOOL expectedExists = [row[@"exists"] boolValue];
+        if (AFCExists(afc, path) != expectedExists) return NO;
+        if (expectedExists) {
+            NSData *expected = [NSData dataWithContentsOfFile:
+                [root stringByAppendingPathComponent:SnapshotFileName(index)]];
+            NSData *observed =
+                AFCReadFileWithLimit(afc, path, 128 * 1024 * 1024);
+            if (!expected || !observed || ![observed isEqualToData:expected])
+                return NO;
+        }
+    }
+
+    NSDictionary *directories = snapshot[@"directories"];
+    for (NSUInteger index = 0;
+         index < sizeof(TrackedBooksDirectories) / sizeof(char *);
+         index++) {
+        NSString *path =
+            [NSString stringWithUTF8String:TrackedBooksDirectories[index]];
+        BOOL expectedExists = [directories[path] boolValue];
+        BOOL exists = AFCExists(afc, path);
+        if (exists != expectedExists) return NO;
+        if (exists && ![AFCFileKind(afc, path) isEqual:@"S_IFDIR"])
+            return NO;
+    }
+    return YES;
+}
+
+static BOOL EnsureBooksParent(AFCConnectionRef afc, NSString *path) {
+    if (!EnsureDirectory(afc, @"Books")) return NO;
+    if ([path hasPrefix:@"Books/Sync/"] &&
+        !EnsureDirectory(afc, @"Books/Sync")) return NO;
+    if ([path hasPrefix:@"Books/Sync/Database/"] &&
+        !EnsureDirectory(afc, @"Books/Sync/Database")) return NO;
+    return YES;
+}
+
+static NSDictionary *RestoreBooksState(AFCConnectionRef afc, NSString *root) {
+    NSDictionary *snapshot = LoadBooksSnapshot(root);
+    if (!snapshot) return @{ @"ok": @NO, @"error": @"invalid snapshot" };
+    NSMutableArray<NSString *> *failures = NSMutableArray.array;
+    NSDictionary *files = snapshot[@"files"];
+
+    for (NSUInteger index = 0;
+         index < sizeof(TrackedBooksFiles) / sizeof(char *);
+         index++) {
+        NSString *path = [NSString stringWithUTF8String:TrackedBooksFiles[index]];
+        NSDictionary *row = files[path];
+        if ([row[@"exists"] boolValue]) {
+            NSData *data = [NSData dataWithContentsOfFile:
+                [root stringByAppendingPathComponent:SnapshotFileName(index)]];
+            if (!data || !EnsureBooksParent(afc, path) ||
+                !AFCWriteFile(afc, path, data)) [failures addObject:path];
+        } else if (!RemoveIfPresent(afc, path)) {
+            [failures addObject:path];
+        }
+    }
+
+    NSDictionary *directories = snapshot[@"directories"];
+    for (NSInteger index =
+             (NSInteger)(sizeof(TrackedBooksDirectories) / sizeof(char *)) - 1;
+         index >= 0; index--) {
+        NSString *path =
+            [NSString stringWithUTF8String:TrackedBooksDirectories[index]];
+        if (![directories[path] boolValue] && !RemoveIfPresent(afc, path))
+            [failures addObject:path];
+    }
+    BOOL verified = failures.count == 0 &&
+        BooksStateMatchesSnapshot(afc, root, snapshot);
+    return @{ @"ok": @(verified),
+              @"failures": failures,
+              @"preimageVerified": @(verified) };
 }
 
 static BOOL IsSafeRelativePath(NSString *path) {
@@ -450,18 +676,21 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
     NSString *recovered = args[2];
     NSData *archive = [NSData dataWithContentsOfFile:args[3]];
     NSData *books = [NSData dataWithContentsOfFile:args[4]];
+    NSString *snapshotRoot = args[5];
+    NSDictionary *snapshot = LoadBooksSnapshot(snapshotRoot);
     BOOL safeArguments =
         GeneratedNamesMatch(source, linkDestination, recovered);
-    BOOL booksAbsent = AllTrackedBooksFilesAbsent(session->afc);
+    BOOL snapshotMatches = snapshot && BooksStateMatchesSnapshot(
+        session->afc, snapshotRoot, snapshot);
     BOOL freshPaths = !AFCExists(session->afc, source) &&
         !AFCExists(session->afc, linkDestination) &&
         !AFCExists(session->afc, recovered);
-    if (!safeArguments || !archive || !books || !booksAbsent || !freshPaths) {
+    if (!safeArguments || !archive || !books || !snapshotMatches || !freshPaths) {
         return @{ @"ok": @NO,
                   @"cleanupAuthorized": @NO,
                   @"safeArguments": @(safeArguments),
                   @"localInputsReadable": @(archive != nil && books != nil),
-                  @"booksPreimageAbsent": @(booksAbsent),
+                  @"booksPreimageStable": @(snapshotMatches),
                   @"freshPaths": @(freshPaths) };
     }
 
@@ -509,7 +738,7 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
     return @{ @"ok": @(ok),
               @"cleanupAuthorized": @YES,
               @"safeArguments": @YES,
-              @"booksPreimageAbsent": @YES,
+              @"booksPreimageStable": @YES,
               @"freshPaths": @YES,
               @"zipServiceStatus": @(serviceStatus),
               @"zipMessageStatus": @(messageStatus),
@@ -527,10 +756,13 @@ static NSDictionary *Finish(DeviceSession *session, NSArray<NSString *> *args) {
     NSString *targetTail = args[4];
     NSString *targetLeaf = args[5];
     NSString *waitArgument = args[6];
+    NSString *snapshotRoot = args[7];
+    NSDictionary *snapshot = LoadBooksSnapshot(snapshotRoot);
     BOOL safeArguments =
         GeneratedNamesMatch(source, linkDestination, recovered) &&
         IsSafeRelativePath(targetTail) && IsCanaryLeaf(targetLeaf) &&
         expected.length > 0 && expected.length < 4096 &&
+        snapshot != nil &&
         ([waitArgument isEqual:@"0"] || [waitArgument isEqual:@"1"]);
     if (!safeArguments)
         return @{ @"ok": @NO, @"safeArguments": @NO };
@@ -559,21 +791,16 @@ static NSDictionary *Finish(DeviceSession *session, NSArray<NSString *> *args) {
         [failures addObject:@"recovered file"];
     if (!RemoveGeneratedTree(session->afc, source, 0))
         [failures addObject:@"StreamingZip tree"];
-    for (NSUInteger index = 0;
-         index < sizeof(TrackedBooksFiles) / sizeof(char *);
-         index++) {
-        NSString *path =
-            [NSString stringWithUTF8String:TrackedBooksFiles[index]];
-        if (!RemoveIfPresent(session->afc, path))
-            [failures addObject:path.lastPathComponent];
-    }
+    sleep(2);
+    NSDictionary *booksRestore = RestoreBooksState(session->afc, snapshotRoot);
+    BOOL booksRestored = [booksRestore[@"ok"] boolValue];
+    if (!booksRestored) [failures addObject:@"Books preimage"];
 
     BOOL sourceAbsent = !AFCExists(session->afc, source);
     BOOL linkAbsent = !AFCExists(session->afc, linkDestination);
     BOOL recoveredAbsent = !AFCExists(session->afc, recovered);
-    BOOL booksAbsent = AllTrackedBooksFilesAbsent(session->afc);
     BOOL cleanupComplete = failures.count == 0 && targetAbsent &&
-        sourceAbsent && linkAbsent && recoveredAbsent && booksAbsent;
+        sourceAbsent && linkAbsent && recoveredAbsent && booksRestored;
     return @{ @"ok": @(bytesMatch && cleanupComplete),
               @"safeArguments": @YES,
               @"recoveredPresent": @(recoveredPresent),
@@ -587,7 +814,8 @@ static NSDictionary *Finish(DeviceSession *session, NSArray<NSString *> *args) {
               @"sourceAbsent": @(sourceAbsent),
               @"linkAbsent": @(linkAbsent),
               @"recoveredAbsent": @(recoveredAbsent),
-              @"booksFilesAbsent": @(booksAbsent) };
+              @"booksPreimageRestored": @(booksRestored),
+              @"booksRestore": booksRestore };
 }
 
 int main(int argc, const char *argv[]) {
@@ -606,20 +834,32 @@ int main(int argc, const char *argv[]) {
         NSDictionary *operation = nil;
         if (session.afcStatus == 0 && session.afc && targetGatePassed) {
             if ([command isEqual:@"probe"] && argc == 3) {
+                NSArray<NSString *> *presentPaths =
+                    PresentTrackedBooksPaths(session.afc);
                 operation = @{ @"ok": @YES,
                     @"booksStagingAbsent":
                         @(AllTrackedBooksFilesAbsent(session.afc)),
+                    @"presentBooksPaths": presentPaths,
+                    @"fixedSyncInputPresent":
+                        @([presentPaths containsObject:@"Books/Sync/Books.plist"]),
                     @"booksSyncPlistPresent":
                         @(AFCExists(session.afc, @"Books/Sync/Books.plist")) };
-            } else if ([command isEqual:@"stage"] && argc == 8) {
+            } else if ([command isEqual:@"snapshot-books"] && argc == 4) {
+                operation = SnapshotBooksState(
+                    session.afc, [NSString stringWithUTF8String:argv[3]]);
+            } else if ([command isEqual:@"restore-books"] && argc == 4) {
+                operation = RestoreBooksState(
+                    session.afc, [NSString stringWithUTF8String:argv[3]]);
+            } else if ([command isEqual:@"stage"] && argc == 9) {
                 operation = Stage(&session, @[
                     [NSString stringWithUTF8String:argv[3]],
                     [NSString stringWithUTF8String:argv[4]],
                     [NSString stringWithUTF8String:argv[5]],
                     [NSString stringWithUTF8String:argv[6]],
                     [NSString stringWithUTF8String:argv[7]],
+                    [NSString stringWithUTF8String:argv[8]],
                 ]);
-            } else if ([command isEqual:@"finish"] && argc == 10) {
+            } else if ([command isEqual:@"finish"] && argc == 11) {
                 operation = Finish(&session, @[
                     [NSString stringWithUTF8String:argv[3]],
                     [NSString stringWithUTF8String:argv[4]],
@@ -628,6 +868,7 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[7]],
                     [NSString stringWithUTF8String:argv[8]],
                     [NSString stringWithUTF8String:argv[9]],
+                    [NSString stringWithUTF8String:argv[10]],
                 ]);
             }
         }

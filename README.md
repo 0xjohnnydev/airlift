@@ -105,7 +105,8 @@ StreamingZip accepts the relative symlink while it is still contained in its
 extraction directory. The first move relocates it below Media; the second uses
 it as part of the destination and writes the payload outside Media.
 
-The included PoC writes a random canary, verifies it, and removes it.
+The included PoC writes a random canary, verifies it, and removes it. Existing
+Books sync files are preserved and restored after the run.
 
 #### Build and run
 

@@ -326,17 +326,14 @@ def operation_ok(result: dict[str, Any]) -> bool:
     )
 
 
-def preflight(udid: str) -> None:
+def preflight(udid: str) -> dict[str, Any]:
     result = native("probe", udid)
     operation = result.get("operation", {})
     if not operation_ok(result):
         raise AirLiftError(
             "device/build preflight failed", {"preflight": result}
         )
-    if operation.get("booksStagingAbsent") is not True:
-        raise AirLiftError(
-            "Books sync staging is already in use", {"preflight": result}
-        )
+    return operation
 
 
 def attempt(
@@ -368,11 +365,14 @@ def attempt(
         archive_path = work / "payload.zip"
         books_path = work / "Books.plist"
         expected_path = work / "expected.bin"
+        snapshot_root = work / "books-snapshot"
+        snapshot_root.mkdir()
         archive_path.write_bytes(build_archive(target, payload))
         books_path.write_bytes(build_books(identifiers))
         expected_path.write_bytes(payload)
 
         preflight(udid)
+        snapshot: dict[str, Any] = {"operation": {"ok": False}}
         stage: dict[str, Any] = {"operation": {"ok": False}}
         atc: dict[str, Any] = {"ok": False}
         finish: dict[str, Any] = {"operation": {"ok": False}}
@@ -381,6 +381,16 @@ def attempt(
         cleanup_authorized = False
         airtraffic_attempted = False
         try:
+            snapshot = native("snapshot-books", udid, os.fspath(snapshot_root))
+            if not operation_ok(snapshot):
+                raise AirLiftError("could not preserve Books state")
+            present_paths = snapshot.get("operation", {}).get("presentPaths", [])
+            if present_paths:
+                print(
+                    f"Preserving {len(present_paths)} existing Books sync "
+                    f"artifact{'s' if len(present_paths) != 1 else ''}.",
+                    file=sys.stderr,
+                )
             stage = native(
                 "stage",
                 udid,
@@ -389,6 +399,7 @@ def attempt(
                 recovered,
                 os.fspath(archive_path),
                 os.fspath(books_path),
+                os.fspath(snapshot_root),
             )
             cleanup_authorized = bool(
                 stage.get("operation", {}).get("cleanupAuthorized")
@@ -414,6 +425,7 @@ def attempt(
                         target[1:],
                         leaf,
                         "1" if airtraffic_attempted else "0",
+                        os.fspath(snapshot_root),
                     )
                 except Exception as error:
                     finish_error = error
@@ -422,11 +434,15 @@ def attempt(
 
     operation = finish.get("operation", {})
     result = {
+        "booksPreimagePaths": snapshot.get("operation", {}).get(
+            "presentPaths", []
+        ),
         "stageSucceeded": operation_ok(stage),
         "airTrafficSucceeded": bool(atc.get("exitCode") == 0 and atc.get("ok")),
         "exactBytesRecovered": bool(operation.get("recoveredBytesMatch")),
         "cleanupComplete": bool(operation.get("cleanupComplete")),
         "targetAbsent": operation.get("targetAbsent"),
+        "booksPreimageRestored": operation.get("booksPreimageRestored"),
     }
     attempt_ok = bool(
         result["stageSucceeded"]
@@ -436,6 +452,7 @@ def attempt(
     )
     if verbose or not attempt_ok:
         diagnostics: dict[str, Any] = {
+            "booksSnapshot": snapshot,
             "stage": stage,
             "airTraffic": atc,
             "finish": finish,

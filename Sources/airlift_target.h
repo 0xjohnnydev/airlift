@@ -3,6 +3,7 @@
 
 #define AIRLIFT_TESTED_BUILDS(X) \
     X(@"27.0", @"24A435")       \
+    X(@"27.0", @"24A437")       \
     X(@"27.0", @"24A5390f")
 
 #define AIRLIFT_SOURCE_PREFIX @"airlift-src-"

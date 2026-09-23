@@ -1,0 +1,1 @@
+pymobiledevice3>=10.7.4,<12

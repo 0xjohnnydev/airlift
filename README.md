@@ -6,7 +6,7 @@ This is a simple proof-of-concept for developers and security researchers.
 
 If you are worried about 🔥🪲4⃣☁️ (burning bugs for clout) - there are always more bugs <sub><img src="./assets/trollface.svg" width="22" height="18" alt="trollface"></sub>
 
-AirTraffic syncs media, including Books, from a Mac to iOS. airlift abuses that path to read and write files outside AirTraffic's intended directory scope. It runs from a paired Mac over Wi-Fi or USB, with no iOS app required. Tested on iOS 27.0 RC (24A435); it should also work on iOS 27.0 final (24A437). Other iPhone builds are allowed with a warning.
+AirTraffic syncs media, including Books, from a Mac to iOS. airlift abuses that path to read and write files outside AirTraffic's intended directory scope. It runs from a paired host over Wi-Fi or USB, with no iOS app required. Tested on iOS 27.0 RC (24A435) and iOS 27.0 final (24A437). Other iPhone builds are allowed with a warning.
 
 #### Verified scope
 
@@ -44,10 +44,15 @@ As of now, this does **not** work on the MobileGestalt plist.
 <tr><td>
 
 ```text
-──────────────── macOS ────────────────
+────────────── macOS host ──────────────
 MobileDevice.framework
 ↓
 AirTrafficHost.framework
+
+───────────── Windows host ─────────────
+pymobiledevice3 + Apple Mobile Device Support
+↓
+AirTrafficHost.dll
 
 ───────────────── iOS ─────────────────
 com.apple.streaming_zip_conduit
@@ -129,3 +134,39 @@ make
 </table>
 
 The default destination is `/var/mobile/Library/SpringBoard`.
+
+#### Windows
+
+The Windows host uses Apple Mobile Device Support's `AirTrafficHost.dll` and
+`CoreFoundation.dll` for the AirTraffic exchange, plus `pymobiledevice3` for
+paired-device discovery, StreamingZip, and AFC. It implements the same fresh,
+self-cleaning canary as the macOS host; it is not a generic read/write tool.
+
+Install 64-bit Apple Mobile Device Support (the desktop iTunes installer is
+one source), Python 3.11 or newer, and the Python dependency:
+
+```powershell
+pip install -r requirements-windows.txt
+python airlift_windows.py
+
+# Select an exact paired device or another fresh-file destination.
+python airlift_windows.py --device <UDID> --target /var/mobile/Library/Caches
+```
+
+The Windows result uses the same top-level evidence fields as the macOS PoC:
+exact recovered bytes, target/generated-path cleanup, and verified restoration
+of the Books preimage. Unexpected or untested iPhone builds are allowed with a
+warning, matching the upstream policy.
+
+The Windows implementation was validated over USB against the default
+`/var/mobile/Library/SpringBoard` target on:
+
+- iPhone 15 Pro (`iPhone16,1`), iOS 27.0 final (`24A437`): exact 83-byte
+  canary, all three expected manifest assets, complete generated-path cleanup,
+  and restoration of the initially empty Books preimage; and
+- iPhone 17 Pro (`iPhone18,1`), iOS 26.0 (`23A330`): exact 83-byte canary,
+  complete cleanup, and byte-for-byte restoration of five pre-existing Books
+  artifacts.
+
+The iOS 26 result is a compatibility observation, not a claim that iOS 26 is
+an upstream tested target.

@@ -1,19 +1,25 @@
-# airlift
+# AirLift: original PoC
 
-### An AirTraffic sandbox escape for iOS 27.0.
+This is the original, more flexible AirLift PoC. The
+[current version](../../cleanroom/README.md) focuses on one temporary file in
+`/var/tmp`. This archive keeps the original program, its target options, and
+the research behind it.
 
-This is a simple proof-of-concept for developers and security researchers.
+AirTraffic moves media such as Books from a Mac to an iPhone. This PoC gives
+AirTraffic a path that leads outside its intended Media area. It can create a
+new file there without installing an iPhone app. In this document, **path
+escape** means a media service reaches files beyond that area; it does not
+mean kernel access or a full device takeover.
 
-If you are worried about 🔥🪲4⃣☁️ (burning bugs for clout) - there are always more bugs <sub><img src="./assets/trollface.svg" width="22" height="18" alt="trollface"></sub>
+The original program can connect from a paired Mac over USB or Wi-Fi. Its
+known-build list includes iOS 27.0 builds `24A435` and `24A5390f`. It warns
+before running on other builds. The current version is limited to build
+`24A437`.
 
-AirTraffic syncs media, including Books, from a Mac to iOS. airlift abuses that path to read and write files outside AirTraffic's intended directory scope. It runs from a paired Mac over Wi-Fi or USB, with no iOS app required. Tested on iOS 27.0 RC (24A435); it should also work on iOS 27.0 final (24A437). Other iPhone builds are allowed with a warning.
+## Where it can create files
 
-#### Verified scope
-
-Fresh-file writes were confirmed in the following directories:
-
-<table>
-<tr><td>
+The original research demonstrated creating a **new** file in each of these
+directories:
 
 ```text
 /var/mobile
@@ -30,50 +36,28 @@ Fresh-file writes were confirmed in the following directories:
 /var/tmp
 ```
 
-</td></tr>
-</table>
+Reading is indirect: AirTraffic moves a known file into Media, the Mac reads
+it through AFC (Apple File Conduit), and AirTraffic moves it back. The original
+PoC has not shown a working path to the MobileGestalt plist, a system
+configuration file.
 
-Reads are indirect: a known file is moved into Media, read through AFC, and
-moved back.
+## Services involved
 
-As of now, this does **not** work on the MobileGestalt plist.
+On the Mac, `MobileDevice.framework` connects to the phone and
+`AirTrafficHost.framework` drives the Books sync. On the iPhone:
 
-#### Components
+- `com.apple.streaming_zip_conduit` unpacks the ZIP archive.
+- `com.apple.afc` gives the paired Mac access to the Media area.
+- `com.apple.atc` (AirTrafficDevice) and the Books sync client process the
+  Book entries.
+- `ATLegacyAssetLink` and `ATAirlock` choose the file moves, which
+  `NSFileManager` performs.
 
-<table>
-<tr><td>
+## Why the path escapes
 
-```text
-──────────────── macOS ────────────────
-MobileDevice.framework
-↓
-AirTrafficHost.framework
-
-───────────────── iOS ─────────────────
-com.apple.streaming_zip_conduit
-↓
-com.apple.afc
-↓
-com.apple.atc / AirTrafficDevice
-↓
-Books sync client
-↓
-ATLegacyAssetLink
-↓
-ATAirlock
-↓
-NSFileManager
-```
-
-</td></tr>
-</table>
-
-#### ATAirlock path validation
-
-Effective logic in `-[ATAirlock processCompletedAsset:]` for these Book assets:
-
-<table>
-<tr><td>
+The Books “Persistent ID” becomes the source path. The
+`FileComplete.AssetPath` field becomes the destination path. For these Book
+assets, the relevant logic in `-[ATAirlock processCompletedAsset:]` is:
 
 ```objc
 // Books "Persistent ID" reaches asset.identifier without path validation.
@@ -97,35 +81,32 @@ if (![destination hasPrefix:@"/var/mobile/Media/"])
                       error:&error];
 ```
 
-</td></tr>
-</table>
+`..` means “parent directory.” The source accepts those components without
+checking where they lead. The destination check looks at a normalized path
+string, but it does not check where a symbolic link actually points.
 
-The unchecked source accepts `..` components from a Books asset identifier.
-StreamingZip accepts the relative symlink while it is still contained in its
-extraction directory. The first move relocates it below Media; the second uses
-it as part of the destination and writes the payload outside Media.
+The ZIP first places a relative symbolic link inside its extraction folder.
+AirTraffic moves that link under Media, changing what the relative link points
+to. Its next move follows the link and places the canary outside Media. The
+program reads the canary back, removes it, and restores any Books sync files
+that were present before the run.
 
-The included PoC writes a random canary, verifies it, and removes it. Existing
-Books sync files are preserved and restored after the run.
+## Run the original version
 
-#### Build and run
-
-airlift lists compatible paired iPhones and asks which one to use. Pass a
-UDID with `--device` to skip the prompt. Failed runs include helper diagnostics;
-pass `--verbose` to include them on successful runs too.
-
-<table>
-<tr><td>
+From the repository root:
 
 ```sh
-make
-./airlift.py
-
-# Choose another destination.
-./airlift.py --target /var/mobile/Library/Safari
+make -C archive/original
+python3 archive/original/airlift.py
 ```
 
-</td></tr>
-</table>
+The program lists paired iPhones and asks you to choose one. Use `--device`
+with the phone's UDID to skip the picker. The default destination is
+`/var/mobile/Library/SpringBoard`; choose another directory with `--target`:
 
-The default destination is `/var/mobile/Library/SpringBoard`.
+```sh
+python3 archive/original/airlift.py --target /var/tmp
+```
+
+Add `--verbose` if you need helper details. The program creates a new,
+randomly named canary file and removes it at the end.

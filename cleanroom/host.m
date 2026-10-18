@@ -66,9 +66,11 @@ static DeviceRef found;
 static void print_json(NSDictionary *row) {
     NSData *bytes = [NSJSONSerialization dataWithJSONObject:row options:0 error:nil];
     if (bytes) {
-        fwrite(bytes.bytes, 1, bytes.length, stdout);
-        fputc('\n', stdout);
-        fflush(stdout);
+        // AirTrafficHost left stdout unavailable in the sync process.
+        fputs("AIRLIFT_RESULT=", stderr);
+        fwrite(bytes.bytes, 1, bytes.length, stderr);
+        fputc('\n', stderr);
+        fflush(stderr);
     }
 }
 
@@ -361,13 +363,13 @@ static int sync_assets(NSString *udid, NSArray<NSString *> *args) {
     if (!ready) {
         ATHostConnectionRelease(at); return error_out(@"Book assets missing from manifest");
     }
-    fputs("{\"ok\":true,\"manifestAssets\":3,\"completionMessagesPlanned\":3}\n", stderr);
-    fflush(stderr);
     for (int i = 0; i < 6; i += 2) {
         ATHostConnectionSendAssetCompleted(at, (__bridge CFStringRef)args[i],
             CFSTR("Book"), (__bridge CFStringRef)args[i + 1]);
         if (i < 4) usleep(900000);
     }
+    print_json(@{ @"ok": @YES, @"manifestAssets": @3,
+        @"fileCompleteCallsReturned": @3 });
     sleep(2);
     ATHostConnectionRelease(at);
     alarm(0);

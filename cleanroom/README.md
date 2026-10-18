@@ -4,27 +4,6 @@ AirLift shows AirTraffic creating one new file outside the iPhone's Media
 area. The file is a **canary**: short, random text used only to show where the
 write landed. The PoC places it in `/var/tmp`, reads it back, and removes it.
 
-## Before you run
-
-Use a Mac with Python 3 and Xcode. Pair the iPhone with the Mac, connect it by
-USB, and find its UDID (device identifier):
-
-```sh
-xcrun devicectl list devices
-```
-
-AirLift accepts iOS 27.0 build `24A437`. It has been used on an iPhone
-18 Pro (`iPhone19,2`).
-
-From the repository root, run:
-
-```sh
-make -C cleanroom
-python3 cleanroom/poc.py --device YOUR_UDID
-```
-
-Replace `YOUR_UDID` with the identifier shown by the first command.
-
 ## What happens
 
 1. The Mac makes a ZIP archive with the canary and a **symbolic link** (a
@@ -51,3 +30,18 @@ does not report whether it used USB or Wi-Fi.
 
 The `cleanroom` folder name refers to a separate implementation. It does not
 claim the vulnerability was discovered without studying earlier AirLift code.
+
+## Build and run
+
+Use a Mac with Python 3 and Xcode. Pair the iPhone with the Mac and connect it
+by USB. AirLift accepts iOS 27.0 build `24A437` and has been used on an
+iPhone 18 Pro (`iPhone19,2`). From the repository root:
+
+```sh
+xcrun devicectl list devices
+make -C cleanroom
+python3 cleanroom/poc.py --device YOUR_UDID
+```
+
+The first command shows the phone's UDID (device identifier). Replace
+`YOUR_UDID` with that value.

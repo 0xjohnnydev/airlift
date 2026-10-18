@@ -1,14 +1,53 @@
-# Independent AirLift PoC
+# Current AirLift PoC
 
-This directory contains a separate implementation of the AirLift path escape. It does not import or run the repository's original Python program or native helpers. Its author consulted that original PoC, so the directory name is not a claim of formal clean-room provenance. It demonstrates one fresh-file write to `/var/tmp` while a paired iPhone is connected by USB. The canary is moved back into Media, read through AFC, compared byte for byte, and removed.
+This version shows AirTraffic creating one new file outside the iPhone's Media
+area. The file is a **canary**: short, random text used only to show where the
+write landed. The PoC places it in `/var/tmp`, reads it back, and removes it.
 
-Build and run on the paired Mac:
+## Before you run
+
+Use a Mac with Python 3 and Xcode. Pair the iPhone with the Mac, connect it by
+USB, and find its UDID (device identifier):
+
+```sh
+xcrun devicectl list devices
+```
+
+This version accepts iOS 27.0 build `24A437`. It has been used on an iPhone
+18 Pro (`iPhone19,2`).
+
+From the repository root, run:
 
 ```sh
 make -C cleanroom
-python3 cleanroom/poc.py --device <iPhone UDID>
+python3 cleanroom/poc.py --device <UDID>
 ```
 
-The PoC currently accepts iOS 27.0 build 24A437. It refuses to start if a Books file it needs to write already exists, or if its generated Media paths already exist. It preserves unrelated Books content, including existing directories. It checks and removes the files and directories it creates. If cleanup fails, it leaves its local recovery inputs in a temporary directory and reports that path.
+## What happens
 
-The run is complete only when the phone returns the exact canary bytes and cleanup is verified. The host reports that all three completion calls returned; the private API does not acknowledge each call. A successful compile, sync handshake, or printed success line alone is insufficient. Staging and AFC use a direct device connection; the AirTrafficHost transport is not independently identified.
+1. The Mac makes a ZIP archive with the canary and a **symbolic link** (a
+   file-system pointer). At first, the link points to another folder inside
+   the extracted archive.
+2. The Mac sends the archive to the iPhone and starts a Books media sync.
+   AirTraffic moves the link to a new location, then follows it when it moves
+   the canary. That places the canary in `/var/tmp`, outside Media.
+3. AirTraffic moves the canary back into Media. The Mac reads it through
+   **AFC** (Apple File Conduit, the service that gives a paired Mac access to
+   Media) and compares every byte with the original.
+4. The PoC removes the files it created. It preserves unrelated Books content
+   already on the phone and stops if a file it needs to write already exists.
+
+The output uses `exactBytesRecovered: true` for the matching file contents
+and `cleanupComplete: true` for completed cleanup. If cleanup fails, look for
+`recoveryFiles` in the output; that directory holds the Mac-side inputs needed
+to inspect the run. `fileCompleteCallsReturned: 3` means the Mac called the
+private AirTraffic API three times. The API does not confirm delivery of each
+call, so the file readback is the evidence of the effect.
+
+The archive upload and AFC read use a direct device connection. The sync API
+does not report whether it used USB or Wi-Fi.
+
+This code is separate from the [original PoC](../archive/original/README.md)
+and does not run its helpers. We read the original source while writing this
+version. The `cleanroom` folder name means the code is separate; it does not
+mean it was written without seeing the original.

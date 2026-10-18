@@ -5,7 +5,6 @@ import argparse
 import hashlib
 import io
 import json
-import os
 import plistlib
 import posixpath
 import secrets
@@ -21,6 +20,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 AIRLOCK = "/var/mobile/Media/Airlock/Book"
 TARGET = "/var/tmp"
+RESULT_PREFIX = "AIRLIFT_RESULT="
 
 
 def entry(name: str, mode: int) -> zipfile.ZipInfo:
@@ -63,19 +63,19 @@ def host(mode: str, device: str, *args: str, timeout: int = 50,
          allow_failure: bool = False) -> dict:
     command = [str(HERE / "host"), mode, device, *args]
     completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-    try:
-        result = json.loads(completed.stdout.strip())
-    except json.JSONDecodeError:
-        result = {}
-    if not result and mode == "sync":
-        for line in reversed(completed.stderr.splitlines()):
-            try:
-                result = json.loads(line)
-                break
-            except json.JSONDecodeError:
-                pass
+    result = {}
+    for line in reversed(completed.stderr.splitlines()):
+        if not line.startswith(RESULT_PREFIX):
+            continue
+        try:
+            parsed = json.loads(line[len(RESULT_PREFIX):])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            result = parsed
+            break
     if (completed.returncode != 0 or not result.get("ok")) and not (allow_failure and result):
-        detail = completed.stderr.strip() or result.get("error") or "no result"
+        detail = result.get("error") or completed.stderr.strip() or "no result"
         raise RuntimeError(f"{mode} failed ({completed.returncode}): {detail}")
     return result
 
@@ -129,7 +129,9 @@ def run(device: str) -> dict:
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 error = f"{error}; cleanup: {exc}" if error else f"cleanup: {exc}"
 
-    proven = bool(staged and sync_result and finish and finish.get("bytesMatch"))
+    proven = bool(staged and sync_result and
+                  sync_result.get("fileCompleteCallsReturned") == 3 and
+                  finish and finish.get("bytesMatch"))
     clean = bool(finish and finish.get("cleanupComplete"))
     result = {
         "ok": proven and clean and error is None,

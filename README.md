@@ -13,25 +13,29 @@ It reads the file back and removes it, without installing an iPhone app. Here,
 “sandbox escape” means the media service crosses that file boundary; it does
 not mean kernel access or control of the whole phone.
 
-## Build and run
+## Reachable paths
 
-You need a Mac with Python 3 and Xcode, plus a paired iPhone that trusts the
-Mac and is connected by USB. AirLift accepts iOS 27.0 build `24A437`. It has
-been used on an iPhone 18 Pro (`iPhone19,2`). From the repository root:
+Fresh-file writes were confirmed in these directories on iOS 27.0 RC
+(`24A435`):
 
-```sh
-xcrun devicectl list devices
-make
-python3 cleanroom/poc.py --device YOUR_UDID
+```text
+/var/mobile
+/var/mobile/Documents
+/var/mobile/Library
+/var/mobile/Library/Preferences
+/var/mobile/Library/Caches
+/var/mobile/Library/SpringBoard
+/var/mobile/Library/SMS
+/var/mobile/Library/Safari
+/var/mobile/Containers
+/var/mobile/Containers/Data/Application
+/var/mobile/Containers/Shared/AppGroup
+/var/tmp
 ```
 
-The first command shows the phone's **UDID** (device identifier). Replace
-`YOUR_UDID` with that value. The [PoC guide](cleanroom/README.md) has a shorter
-step-by-step account of the run.
-
-## Demonstrated scope
-
-AirLift makes a fresh, randomly named canary file in `/var/tmp`:
+The included PoC uses a fixed `/var/tmp` destination on iOS 27.0 build
+`24A437`, where it has been used on an iPhone 18 Pro (`iPhone19,2`). It makes
+a fresh, randomly named canary file:
 
 ```text
 /var/tmp/cl-canary-<random>.bin
@@ -40,8 +44,10 @@ AirLift makes a fresh, randomly named canary file in `/var/tmp`:
 A **canary** is short, random text used to show where the write landed. The
 PoC moves that file back into Media and reads it through **AFC** (Apple File
 Conduit), which gives a paired Mac access to Media. It compares every byte
-with the text it created. This run demonstrates that one file path; it does
-not establish writes to other target directories or reads of unrelated files.
+with the text it created. The other listed directories were confirmed on
+`24A435`; this PoC does not exercise them on `24A437`. The path list concerns
+new files, not overwriting existing ones. Reading is indirect, and a working
+path to the MobileGestalt plist has not been shown.
 
 ## Components
 
@@ -118,3 +124,19 @@ Before writing, AirLift checks for files that could conflict with its run.
 It leaves unrelated Books content in place. If cleanup cannot finish, the
 result names a `recoveryFiles` directory on the Mac with the inputs needed
 to inspect the run.
+
+## Build and run
+
+You need a Mac with Python 3 and Xcode, plus a paired iPhone that trusts the
+Mac and is connected by USB. AirLift accepts iOS 27.0 build `24A437`. From
+the repository root:
+
+```sh
+xcrun devicectl list devices
+make
+python3 cleanroom/poc.py --device YOUR_UDID
+```
+
+The first command shows the phone's **UDID** (device identifier). Replace
+`YOUR_UDID` with that value. The [PoC guide](cleanroom/README.md) has a shorter
+step-by-step account of the run.
